@@ -1,0 +1,17 @@
+﻿[package]
+name = "tokvera-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Preview Rust SDK for Tokvera tracing"
+license = "MIT"
+
+[lib]
+name = "tokvera_rust"
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde", "clock"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "fast-rng"] }
