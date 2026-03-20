@@ -49,6 +49,13 @@ tracer.finish_span(&span, None).unwrap();
 - `examples/provider_wrappers.rs`
 - `examples/otel_bridge.rs`
 
+Each example accepts the same env shape used by the shared smoke and visibility runners:
+- `TOKVERA_API_KEY`
+- `TOKVERA_API_BASE_URL` or `TOKVERA_INGEST_URL`
+- `TOKVERA_FEATURE`
+- `TOKVERA_TENANT_ID`
+- `TOKVERA_ENVIRONMENT`
+
 ## Contract check
 
 ```bash
