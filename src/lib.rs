@@ -1,8 +1,10 @@
-﻿use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use uuid::Uuid;
 
 #[derive(Clone, Default, Debug)]
@@ -199,8 +201,10 @@ impl IngestClient for HttpClient {
             .json(&event)
             .send()
             .map_err(|error| error.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("tokvera ingest failed: {}", response.status()));
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(format!("tokvera ingest failed: {} {}", status, body));
         }
         Ok(())
     }
@@ -228,46 +232,131 @@ impl TokveraTracer {
     pub fn start_trace(&self, options: Option<TrackOptions>) -> Result<TraceHandle, String> {
         let merged = TrackOptions::merge(&self.base, options.as_ref());
         let handle = TraceHandle {
-            trace_id: choose_owned(vec![options.as_ref().and_then(|o| o.trace_id.clone()), merged.trace_id.clone()], "trc"),
-            run_id: choose_owned(vec![options.as_ref().and_then(|o| o.run_id.clone()), merged.run_id.clone()], "run"),
-            span_id: choose_owned(vec![options.as_ref().and_then(|o| o.span_id.clone()), merged.span_id.clone()], "spn"),
+            trace_id: choose_owned(
+                vec![
+                    options.as_ref().and_then(|o| o.trace_id.clone()),
+                    merged.trace_id.clone(),
+                ],
+                "trc",
+            ),
+            run_id: choose_owned(
+                vec![
+                    options.as_ref().and_then(|o| o.run_id.clone()),
+                    merged.run_id.clone(),
+                ],
+                "run",
+            ),
+            span_id: choose_owned(
+                vec![
+                    options.as_ref().and_then(|o| o.span_id.clone()),
+                    merged.span_id.clone(),
+                ],
+                "spn",
+            ),
             parent_span_id: None,
             started_at: Utc::now(),
-            provider: choose_owned(vec![options.as_ref().and_then(|o| o.provider.clone()), merged.provider.clone()], "tokvera"),
-            event_type: choose_owned(vec![options.as_ref().and_then(|o| o.event_type.clone()), merged.event_type.clone()], "tokvera.trace"),
-            endpoint: choose_owned(vec![options.as_ref().and_then(|o| o.endpoint.clone()), merged.endpoint.clone()], "manual.trace"),
-            model: choose_owned(vec![options.as_ref().and_then(|o| o.model.clone()), merged.model.clone()], "manual"),
+            provider: options
+                .as_ref()
+                .and_then(|o| o.provider.clone())
+                .or_else(|| merged.provider.clone())
+                .unwrap_or_else(|| "tokvera".to_string()),
+            event_type: options
+                .as_ref()
+                .and_then(|o| o.event_type.clone())
+                .or_else(|| merged.event_type.clone())
+                .unwrap_or_else(|| "tokvera.trace".to_string()),
+            endpoint: options
+                .as_ref()
+                .and_then(|o| o.endpoint.clone())
+                .or_else(|| merged.endpoint.clone())
+                .unwrap_or_else(|| "manual.trace".to_string()),
+            model: options
+                .as_ref()
+                .and_then(|o| o.model.clone())
+                .or_else(|| merged.model.clone())
+                .unwrap_or_else(|| "manual".to_string()),
             options: merged,
         };
         let hydrated = self.hydrate(handle);
         if hydrated.options.emit_lifecycle_events {
-            self.client.ingest_event(self.build_event(&hydrated, "in_progress", FinishSpanOptions::default()))?;
+            self.client.ingest_event(self.build_event(
+                &hydrated,
+                "in_progress",
+                FinishSpanOptions::default(),
+            ))?;
         }
         Ok(hydrated)
     }
 
-    pub fn start_span(&self, parent: &TraceHandle, options: Option<TrackOptions>) -> Result<TraceHandle, String> {
-        let merged = TrackOptions::merge(&TrackOptions::merge(&self.base, Some(&parent.options)), options.as_ref());
+    pub fn start_span(
+        &self,
+        parent: &TraceHandle,
+        options: Option<TrackOptions>,
+    ) -> Result<TraceHandle, String> {
+        let merged = TrackOptions::merge(
+            &TrackOptions::merge(&self.base, Some(&parent.options)),
+            options.as_ref(),
+        );
         let handle = TraceHandle {
-            trace_id: options.as_ref().and_then(|o| o.trace_id.clone()).or_else(|| merged.trace_id.clone()).unwrap_or_else(|| parent.trace_id.clone()),
-            run_id: options.as_ref().and_then(|o| o.run_id.clone()).or_else(|| merged.run_id.clone()).unwrap_or_else(|| parent.run_id.clone()),
-            span_id: options.as_ref().and_then(|o| o.span_id.clone()).or_else(|| merged.span_id.clone()).unwrap_or_else(|| format!("spn_{}", Uuid::new_v4().simple())),
-            parent_span_id: options.as_ref().and_then(|o| o.parent_span_id.clone()).or_else(|| merged.parent_span_id.clone()).or_else(|| Some(parent.span_id.clone())),
+            trace_id: options
+                .as_ref()
+                .and_then(|o| o.trace_id.clone())
+                .or_else(|| merged.trace_id.clone())
+                .unwrap_or_else(|| parent.trace_id.clone()),
+            run_id: options
+                .as_ref()
+                .and_then(|o| o.run_id.clone())
+                .or_else(|| merged.run_id.clone())
+                .unwrap_or_else(|| parent.run_id.clone()),
+            span_id: options
+                .as_ref()
+                .and_then(|o| o.span_id.clone())
+                .unwrap_or_else(|| format!("spn_{}", Uuid::new_v4().simple())),
+            parent_span_id: options
+                .as_ref()
+                .and_then(|o| o.parent_span_id.clone())
+                .or_else(|| merged.parent_span_id.clone())
+                .or_else(|| Some(parent.span_id.clone())),
             started_at: Utc::now(),
-            provider: options.as_ref().and_then(|o| o.provider.clone()).or_else(|| merged.provider.clone()).unwrap_or_else(|| parent.provider.clone()),
-            event_type: options.as_ref().and_then(|o| o.event_type.clone()).or_else(|| merged.event_type.clone()).unwrap_or_else(|| "tokvera.trace".to_string()),
-            endpoint: options.as_ref().and_then(|o| o.endpoint.clone()).or_else(|| merged.endpoint.clone()).unwrap_or_else(|| "manual.span".to_string()),
-            model: options.as_ref().and_then(|o| o.model.clone()).or_else(|| merged.model.clone()).unwrap_or_else(|| parent.model.clone()),
+            provider: options
+                .as_ref()
+                .and_then(|o| o.provider.clone())
+                .or_else(|| merged.provider.clone())
+                .unwrap_or_else(|| parent.provider.clone()),
+            event_type: options
+                .as_ref()
+                .and_then(|o| o.event_type.clone())
+                .or_else(|| merged.event_type.clone())
+                .unwrap_or_else(|| "tokvera.trace".to_string()),
+            endpoint: options
+                .as_ref()
+                .and_then(|o| o.endpoint.clone())
+                .or_else(|| merged.endpoint.clone())
+                .unwrap_or_else(|| "manual.span".to_string()),
+            model: options
+                .as_ref()
+                .and_then(|o| o.model.clone())
+                .or_else(|| merged.model.clone())
+                .unwrap_or_else(|| parent.model.clone()),
             options: merged,
         };
         let hydrated = self.hydrate(handle);
         if hydrated.options.emit_lifecycle_events {
-            self.client.ingest_event(self.build_event(&hydrated, "in_progress", FinishSpanOptions::default()))?;
+            self.client.ingest_event(self.build_event(
+                &hydrated,
+                "in_progress",
+                FinishSpanOptions::default(),
+            ))?;
         }
         Ok(hydrated)
     }
 
-    pub fn attach_payload(&self, handle: &TraceHandle, payload: Value, payload_type: &str) -> TraceHandle {
+    pub fn attach_payload(
+        &self,
+        handle: &TraceHandle,
+        payload: Value,
+        payload_type: &str,
+    ) -> TraceHandle {
         let mut updated = handle.clone();
         updated.options.payload_blocks.push(json!({
             "payload_type": payload_type,
@@ -276,39 +365,77 @@ impl TokveraTracer {
         updated
     }
 
-    pub fn finish_span(&self, handle: &TraceHandle, options: Option<FinishSpanOptions>) -> Result<(), String> {
-        self.client.ingest_event(self.build_event(handle, "success", options.unwrap_or_default()))
+    pub fn finish_span(
+        &self,
+        handle: &TraceHandle,
+        options: Option<FinishSpanOptions>,
+    ) -> Result<(), String> {
+        self.client
+            .ingest_event(self.build_event(handle, "success", options.unwrap_or_default()))
     }
 
-    pub fn fail_span(&self, handle: &TraceHandle, message: &str, options: Option<FinishSpanOptions>) -> Result<(), String> {
+    pub fn fail_span(
+        &self,
+        handle: &TraceHandle,
+        message: &str,
+        options: Option<FinishSpanOptions>,
+    ) -> Result<(), String> {
         let mut effective = options.unwrap_or_default();
         if effective.error.is_none() {
             effective.error = Some(json!({ "type": "runtime_error", "message": message }));
         }
-        self.client.ingest_event(self.build_event(handle, "failure", effective))
+        self.client
+            .ingest_event(self.build_event(handle, "failure", effective))
     }
 
-    pub fn get_track_options_from_trace_context(&self, handle: &TraceHandle, overrides: Option<TrackOptions>) -> TrackOptions {
-        let mut merged = TrackOptions::merge(&TrackOptions::merge(&self.base, Some(&handle.options)), overrides.as_ref());
-        if overrides.as_ref().and_then(|o| o.trace_id.clone()).is_none() {
+    pub fn get_track_options_from_trace_context(
+        &self,
+        handle: &TraceHandle,
+        overrides: Option<TrackOptions>,
+    ) -> TrackOptions {
+        let mut merged = TrackOptions::merge(
+            &TrackOptions::merge(&self.base, Some(&handle.options)),
+            overrides.as_ref(),
+        );
+        if overrides
+            .as_ref()
+            .and_then(|o| o.trace_id.clone())
+            .is_none()
+        {
             merged.trace_id = Some(handle.trace_id.clone());
         }
         if overrides.as_ref().and_then(|o| o.run_id.clone()).is_none() {
             merged.run_id = Some(handle.run_id.clone());
         }
-        if overrides.as_ref().and_then(|o| o.parent_span_id.clone()).is_none() {
+        if overrides
+            .as_ref()
+            .and_then(|o| o.parent_span_id.clone())
+            .is_none()
+        {
             merged.parent_span_id = Some(handle.span_id.clone());
         }
         if overrides.as_ref().and_then(|o| o.span_id.clone()).is_none() {
             merged.span_id = None;
         }
-        if overrides.as_ref().and_then(|o| o.provider.clone()).is_none() {
+        if overrides
+            .as_ref()
+            .and_then(|o| o.provider.clone())
+            .is_none()
+        {
             merged.provider = Some(handle.provider.clone());
         }
-        if overrides.as_ref().and_then(|o| o.event_type.clone()).is_none() {
+        if overrides
+            .as_ref()
+            .and_then(|o| o.event_type.clone())
+            .is_none()
+        {
             merged.event_type = Some(handle.event_type.clone());
         }
-        if overrides.as_ref().and_then(|o| o.endpoint.clone()).is_none() {
+        if overrides
+            .as_ref()
+            .and_then(|o| o.endpoint.clone())
+            .is_none()
+        {
             merged.endpoint = Some(handle.endpoint.clone());
         }
         if overrides.as_ref().and_then(|o| o.model.clone()).is_none() {
@@ -317,48 +444,89 @@ impl TokveraTracer {
         merged
     }
 
-    pub fn track_openai<F>(&self, parent: &TraceHandle, request: ProviderRequest, operation: F) -> Result<ProviderResult, String>
+    pub fn track_openai<F>(
+        &self,
+        parent: &TraceHandle,
+        request: ProviderRequest,
+        operation: F,
+    ) -> Result<ProviderResult, String>
     where
         F: FnOnce() -> Result<ProviderResult, String>,
     {
         self.track_provider(parent, "openai", request, operation)
     }
 
-    pub fn track_anthropic<F>(&self, parent: &TraceHandle, request: ProviderRequest, operation: F) -> Result<ProviderResult, String>
+    pub fn track_anthropic<F>(
+        &self,
+        parent: &TraceHandle,
+        request: ProviderRequest,
+        operation: F,
+    ) -> Result<ProviderResult, String>
     where
         F: FnOnce() -> Result<ProviderResult, String>,
     {
         self.track_provider(parent, "anthropic", request, operation)
     }
 
-    pub fn track_gemini<F>(&self, parent: &TraceHandle, request: ProviderRequest, operation: F) -> Result<ProviderResult, String>
+    pub fn track_gemini<F>(
+        &self,
+        parent: &TraceHandle,
+        request: ProviderRequest,
+        operation: F,
+    ) -> Result<ProviderResult, String>
     where
         F: FnOnce() -> Result<ProviderResult, String>,
     {
         self.track_provider(parent, "gemini", request, operation)
     }
 
-    pub fn track_mistral<F>(&self, parent: &TraceHandle, request: ProviderRequest, operation: F) -> Result<ProviderResult, String>
+    pub fn track_mistral<F>(
+        &self,
+        parent: &TraceHandle,
+        request: ProviderRequest,
+        operation: F,
+    ) -> Result<ProviderResult, String>
     where
         F: FnOnce() -> Result<ProviderResult, String>,
     {
         self.track_provider(parent, "mistral", request, operation)
     }
 
-    fn track_provider<F>(&self, parent: &TraceHandle, provider: &str, request: ProviderRequest, operation: F) -> Result<ProviderResult, String>
+    fn track_provider<F>(
+        &self,
+        parent: &TraceHandle,
+        provider: &str,
+        request: ProviderRequest,
+        operation: F,
+    ) -> Result<ProviderResult, String>
     where
         F: FnOnce() -> Result<ProviderResult, String>,
     {
-        let mut child = self.start_span(parent, Some(TrackOptions {
-            provider: Some(provider.to_string()),
-            event_type: Some(request.event_type.unwrap_or_else(|| format!("{}.request", provider))),
-            endpoint: Some(request.endpoint.unwrap_or_else(|| default_provider_endpoint(provider))),
-            model: request.model.clone(),
-            step_name: Some(request.step_name.unwrap_or_else(|| format!("{}_call", provider))),
-            span_kind: Some(request.span_kind.unwrap_or_else(|| "model".to_string())),
-            tool_name: request.tool_name.clone(),
-            ..Default::default()
-        }))?;
+        let mut child = self.start_span(
+            parent,
+            Some(TrackOptions {
+                provider: Some(provider.to_string()),
+                event_type: Some(
+                    request
+                        .event_type
+                        .unwrap_or_else(|| format!("{}.request", provider)),
+                ),
+                endpoint: Some(
+                    request
+                        .endpoint
+                        .unwrap_or_else(|| default_provider_endpoint(provider)),
+                ),
+                model: request.model.clone(),
+                step_name: Some(
+                    request
+                        .step_name
+                        .unwrap_or_else(|| format!("{}_call", provider)),
+                ),
+                span_kind: Some(request.span_kind.unwrap_or_else(|| "model".to_string())),
+                tool_name: request.tool_name.clone(),
+                ..Default::default()
+            }),
+        )?;
         if let Some(input) = request.input.clone() {
             if child.options.capture_content {
                 child = self.attach_payload(&child, input, "prompt_input");
@@ -370,15 +538,18 @@ impl TokveraTracer {
                 child = self.attach_payload(&child, output, "model_output");
             }
         }
-        self.finish_span(&child, Some(FinishSpanOptions {
-            usage: result.usage.clone(),
-            outcome: result.outcome.clone(),
-            quality_label: result.quality_label.clone(),
-            feedback_score: result.feedback_score,
-            metrics: result.metrics.clone(),
-            decision: result.decision.clone(),
-            ..Default::default()
-        }))?;
+        self.finish_span(
+            &child,
+            Some(FinishSpanOptions {
+                usage: result.usage.clone(),
+                outcome: result.outcome.clone(),
+                quality_label: result.quality_label.clone(),
+                feedback_score: result.feedback_score,
+                metrics: result.metrics.clone(),
+                decision: result.decision.clone(),
+                ..Default::default()
+            }),
+        )?;
         Ok(result)
     }
 
@@ -392,7 +563,14 @@ impl TokveraTracer {
         handle.options.endpoint = Some(handle.endpoint.clone());
         handle.options.model = Some(handle.model.clone());
         if handle.options.step_name.is_none() {
-            handle.options.step_name = Some(if handle.parent_span_id.is_none() { "trace_root" } else { "span_step" }.to_string());
+            handle.options.step_name = Some(
+                if handle.parent_span_id.is_none() {
+                    "trace_root"
+                } else {
+                    "span_step"
+                }
+                .to_string(),
+            );
         }
         if handle.options.span_kind.is_none() {
             handle.options.span_kind = Some("orchestrator".to_string());
@@ -414,17 +592,39 @@ impl TokveraTracer {
             .outcome
             .clone()
             .or_else(|| handle.options.outcome.clone())
-            .unwrap_or_else(|| if status == "failure" { "failure".to_string() } else { "success".to_string() });
-        let retry_reason = handle.options.retry_reason.clone().or_else(|| options.decision.get("retry_reason").and_then(|value| value.as_str().map(str::to_string)));
-        let fallback_reason = handle.options.fallback_reason.clone().or_else(|| options.decision.get("fallback_reason").and_then(|value| value.as_str().map(str::to_string)));
-        let quality_label = options.quality_label.clone().or_else(|| handle.options.quality_label.clone());
+            .unwrap_or_else(|| {
+                if status == "failure" {
+                    "failure".to_string()
+                } else {
+                    "success".to_string()
+                }
+            });
+        let retry_reason = handle.options.retry_reason.clone().or_else(|| {
+            options
+                .decision
+                .get("retry_reason")
+                .and_then(|value| value.as_str().map(str::to_string))
+        });
+        let fallback_reason = handle.options.fallback_reason.clone().or_else(|| {
+            options
+                .decision
+                .get("fallback_reason")
+                .and_then(|value| value.as_str().map(str::to_string))
+        });
+        let quality_label = options
+            .quality_label
+            .clone()
+            .or_else(|| handle.options.quality_label.clone());
         let feedback_score = options.feedback_score.or(handle.options.feedback_score);
 
         let mut metrics = handle.options.metrics.clone();
         metrics.extend(options.metrics.clone());
         metrics.insert("latency_ms".to_string(), json!(latency_ms));
         metrics.insert("prompt_tokens".to_string(), json!(usage.prompt_tokens));
-        metrics.insert("completion_tokens".to_string(), json!(usage.completion_tokens));
+        metrics.insert(
+            "completion_tokens".to_string(),
+            json!(usage.completion_tokens),
+        );
         metrics.insert("total_tokens".to_string(), json!(usage.total_tokens));
 
         let mut decision = handle.options.decision.clone();
@@ -433,7 +633,12 @@ impl TokveraTracer {
         let mut payload_blocks = handle.options.payload_blocks.clone();
         payload_blocks.extend(options.payload_blocks.clone());
 
-        let evaluation = if outcome.is_empty() && retry_reason.is_none() && fallback_reason.is_none() && quality_label.is_none() && feedback_score.is_none() {
+        let evaluation = if outcome.is_empty()
+            && retry_reason.is_none()
+            && fallback_reason.is_none()
+            && quality_label.is_none()
+            && feedback_score.is_none()
+        {
             Value::Null
         } else {
             json!({
@@ -488,6 +693,7 @@ impl TokveraTracer {
 
 #[derive(Clone)]
 pub struct TokveraOtelBridge {
+    base: TrackOptions,
     client: Arc<dyn IngestClient>,
 }
 
@@ -495,18 +701,26 @@ impl TokveraOtelBridge {
     pub fn new(base: TrackOptions) -> Self {
         let api_key = base.api_key.clone().unwrap_or_default();
         Self {
+            base: base.clone(),
             client: Arc::new(HttpClient::new(api_key, base.base_url.clone())),
         }
     }
 
     pub fn with_client(client: Arc<dyn IngestClient>) -> Self {
-        Self { client }
+        Self {
+            base: TrackOptions::default(),
+            client,
+        }
     }
 
     pub fn export(&self, spans: &[OtelReadableSpan]) -> Result<(), String> {
         for span in spans {
             let latency_ms = (span.end_time - span.start_time).num_milliseconds().max(1);
-            let status = if span.status_code == "error" { "failure" } else { "success" };
+            let status = if span.status_code == "error" {
+                "failure"
+            } else {
+                "success"
+            };
             let payload = json!({
                 "schema_version": "2026-04-01",
                 "event_type": span.attributes.get("tokvera.event_type").cloned().unwrap_or_else(|| json!("tokvera.trace")),
@@ -522,8 +736,8 @@ impl TokveraOtelBridge {
                     "total_tokens": span.attributes.get("gen_ai.usage.total_tokens").cloned().unwrap_or_else(|| json!(0)),
                 },
                 "tags": {
-                    "feature": span.attributes.get("tokvera.feature").cloned().unwrap_or_else(|| json!("otel_bridge")),
-                    "tenant_id": span.attributes.get("tokvera.tenant_id").cloned().unwrap_or_else(|| json!("otel")),
+                    "feature": span.attributes.get("tokvera.feature").cloned().unwrap_or_else(|| json!(self.base.feature.clone().unwrap_or_else(|| "otel_bridge".to_string()))),
+                    "tenant_id": span.attributes.get("tokvera.tenant_id").cloned().unwrap_or_else(|| json!(self.base.tenant_id.clone().unwrap_or_else(|| "otel".to_string()))),
                     "trace_id": span.trace_id,
                     "run_id": span.attributes.get("tokvera.run_id").cloned().unwrap_or_else(|| json!(span.trace_id)),
                     "span_id": span.span_id,
@@ -546,7 +760,11 @@ impl TokveraOtelBridge {
 }
 
 fn choose_owned(values: Vec<Option<String>>, prefix: &str) -> String {
-    values.into_iter().flatten().find(|value| !value.is_empty()).unwrap_or_else(|| format!("{}_{}", prefix, Uuid::new_v4().simple()))
+    values
+        .into_iter()
+        .flatten()
+        .find(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("{}_{}", prefix, Uuid::new_v4().simple()))
 }
 
 fn default_provider_endpoint(provider: &str) -> String {
@@ -559,14 +777,19 @@ fn default_provider_endpoint(provider: &str) -> String {
     }
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct RecordingClient {
     events: Mutex<Vec<Value>>,
 }
 
+#[cfg(test)]
 impl IngestClient for RecordingClient {
     fn ingest_event(&self, event: Value) -> Result<(), String> {
-        self.events.lock().map_err(|error| error.to_string())?.push(event);
+        self.events
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(event);
         Ok(())
     }
 }
@@ -591,28 +814,54 @@ mod tests {
             client,
         );
 
-        let root = tracer.start_trace(Some(TrackOptions {
-            step_name: Some("request_flow".into()),
-            ..Default::default()
-        })).unwrap();
-        let child = tracer.start_span(&root, Some(TrackOptions {
-            provider: Some("openai".into()),
-            event_type: Some("openai.request".into()),
-            endpoint: Some("responses.create".into()),
-            model: Some("gpt-4o-mini".into()),
-            ..Default::default()
-        })).unwrap();
+        let root = tracer
+            .start_trace(Some(TrackOptions {
+                step_name: Some("request_flow".into()),
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(root.provider, "tokvera");
+        assert_eq!(root.event_type, "tokvera.trace");
+        assert_eq!(root.endpoint, "manual.trace");
+        let child = tracer
+            .start_span(
+                &root,
+                Some(TrackOptions {
+                    provider: Some("openai".into()),
+                    event_type: Some("openai.request".into()),
+                    endpoint: Some("responses.create".into()),
+                    model: Some("gpt-4o-mini".into()),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
         let child = tracer.attach_payload(&child, json!({"prompt": "Hello"}), "prompt_input");
-        tracer.finish_span(&child, Some(FinishSpanOptions {
-            usage: Some(Usage { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }),
-            ..Default::default()
-        })).unwrap();
-        tracer.finish_span(&root, Some(FinishSpanOptions {
-            outcome: Some("success".into()),
-            ..Default::default()
-        })).unwrap();
+        tracer
+            .finish_span(
+                &child,
+                Some(FinishSpanOptions {
+                    usage: Some(Usage {
+                        prompt_tokens: 12,
+                        completion_tokens: 8,
+                        total_tokens: 20,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        tracer
+            .finish_span(
+                &root,
+                Some(FinishSpanOptions {
+                    outcome: Some("success".into()),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
 
         let events = recorder.events.lock().unwrap().clone();
+        assert_ne!(root.span_id, child.span_id);
+        assert_eq!(child.parent_span_id.as_deref(), Some(root.span_id.as_str()));
         assert_eq!(events.len(), 4);
         assert_eq!(events[0]["status"], "in_progress");
         assert_eq!(events[2]["status"], "success");
@@ -634,25 +883,37 @@ mod tests {
             },
             client,
         );
-        let root = tracer.start_trace(Some(TrackOptions {
-            step_name: Some("router_root".into()),
-            ..Default::default()
-        })).unwrap();
-        let result = tracer.track_mistral(&root, ProviderRequest {
-            model: Some("mistral-small".into()),
-            input: Some(json!({"prompt": "Classify"})),
-            ..Default::default()
-        }, || {
-            Ok(ProviderResult {
-                output: Some(json!({"label": "billing"})),
-                usage: Some(Usage { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 }),
+        let root = tracer
+            .start_trace(Some(TrackOptions {
+                step_name: Some("router_root".into()),
                 ..Default::default()
-            })
-        }).unwrap();
+            }))
+            .unwrap();
+        let result = tracer
+            .track_mistral(
+                &root,
+                ProviderRequest {
+                    model: Some("mistral-small".into()),
+                    input: Some(json!({"prompt": "Classify"})),
+                    ..Default::default()
+                },
+                || {
+                    Ok(ProviderResult {
+                        output: Some(json!({"label": "billing"})),
+                        usage: Some(Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 2,
+                            total_tokens: 12,
+                        }),
+                        ..Default::default()
+                    })
+                },
+            )
+            .unwrap();
         assert_eq!(result.output.unwrap()["label"], "billing");
         let events = recorder.events.lock().unwrap().clone();
-        assert_eq!(events[1]["provider"], "mistral");
-        assert_eq!(events[1]["event_type"], "mistral.request");
+        assert_eq!(events[0]["provider"], "mistral");
+        assert_eq!(events[0]["event_type"], "mistral.request");
     }
 
     #[test]
@@ -660,22 +921,24 @@ mod tests {
         let recorder = Arc::new(RecordingClient::default());
         let client: Arc<dyn IngestClient> = recorder.clone();
         let bridge = TokveraOtelBridge::with_client(client);
-        bridge.export(&[OtelReadableSpan {
-            name: "llm_call".into(),
-            trace_id: "trc_otel".into(),
-            span_id: "spn_otel".into(),
-            parent_span_id: None,
-            start_time: Utc::now() - chrono::Duration::seconds(1),
-            end_time: Utc::now(),
-            status_code: "ok".into(),
-            attributes: HashMap::from([
-                ("llm.provider".into(), json!("openai")),
-                ("gen_ai.request.model".into(), json!("gpt-4o-mini")),
-                ("tokvera.event_type".into(), json!("openai.request")),
-                ("tokvera.endpoint".into(), json!("responses.create")),
-                ("gen_ai.usage.total_tokens".into(), json!(17)),
-            ]),
-        }]).unwrap();
+        bridge
+            .export(&[OtelReadableSpan {
+                name: "llm_call".into(),
+                trace_id: "trc_otel".into(),
+                span_id: "spn_otel".into(),
+                parent_span_id: None,
+                start_time: Utc::now() - chrono::Duration::seconds(1),
+                end_time: Utc::now(),
+                status_code: "ok".into(),
+                attributes: HashMap::from([
+                    ("llm.provider".into(), json!("openai")),
+                    ("gen_ai.request.model".into(), json!("gpt-4o-mini")),
+                    ("tokvera.event_type".into(), json!("openai.request")),
+                    ("tokvera.endpoint".into(), json!("responses.create")),
+                    ("gen_ai.usage.total_tokens".into(), json!(17)),
+                ]),
+            }])
+            .unwrap();
         let events = recorder.events.lock().unwrap().clone();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event_type"], "openai.request");
